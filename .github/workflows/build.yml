@@ -1,0 +1,84 @@
+name: Download and Process
+
+on:
+  watch:
+    types: [started]
+jobs:
+  process_mmdb:
+    runs-on: ubuntu-latest  
+    steps:
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.8'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install maxminddb pandas ipaddress
+          
+      - name: Set up Go 1.x
+        uses: actions/setup-go@v2
+        with:
+          go-version: ^1.14
+        id: go
+
+      - name: Check out code into the Go module directory
+        uses: actions/checkout@v2
+
+      - name: Get dependencies
+        run: |
+          go get -v -t -d ./...
+          if [ -f Gopkg.toml ]; then
+              curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+              dep ensure
+          fi
+
+      - name: Download MMDB file
+        run: |
+          curl -L -o GeoCN.mmdb https://github.com/ljxi/GeoCN/releases/download/Latest/GeoCN.mmdb\
+          
+      - name: Convert MMDB to TXT and filter data
+        run: |
+          python - <<EOF
+          from ipaddress import IPv4Network, IPv6Network
+          import maxminddb
+
+          PATH = 'GeoCN.mmdb'
+
+          with maxminddb.open_database(PATH) as reader:
+              ip_list = []
+              for ip, info in reader:
+                  if info.get('net') in ['基站', '宽带']:
+                      ip_list.append(f"{ip.network_address}/{ip.prefixlen}")
+
+              # 保存筛选后的 IP 数据到 TXT 文件
+              with open('filtered_ip.txt', 'w') as f:
+                  f.write("\\n".join(ip_list))
+          EOF
+
+      - name: Create dist folder
+        run: |
+          mkdir -p dist
+          cp filtered_ip.txt dist/CN-ip-cidr.txt
+          ls
+          ls dist/
+
+      - name: Compile GeoIP conversion bin (Golang)
+        run: bash build.sh
+
+      - name: Generate GeoIP2 database
+        run: |
+          CURRENT_DIR=$(pwd)
+          cd dist
+          ./ipip2mmdb -s ./CN-ip-cidr.txt -d CN.mmdb
+
+      - name: Upload
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: latest
+          files: |
+            dist/CN.mmdb
